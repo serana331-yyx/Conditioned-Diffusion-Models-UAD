@@ -1,0 +1,45 @@
+# @package _global_
+
+defaults:
+  - override /trainer: default.yaml
+  - override /model: DDPM_2D.yaml
+  - override /datamodule: benchmark.yaml
+
+name: cDDPM_benchmark_controlled
+seed: 2026
+
+model:
+  cfg:
+    # 以下保留原论文 cDDPM 参数
+    test_timesteps: 500
+    dim_mults: [1, 2, 2]
+    unet_dim: 128
+    backbone: Spark_Encoder_2D
+    version: resnet50
+    cond_dim: 128
+    OpenaiUnet: true
+    spatial_transformer: false
+    condition: true
+    noisetype: simplex
+    pretrained_encoder: false
+    encoder_path: null
+    # 仅为统一数据接口修改
+    imageDim: [96, 96]
+    rescaleFactor: 1
+
+    # 当前训练代码 AdamW 所需
+    lr: 0.0001
+    optimizer_betas: [0.9, 0.999]
+    weight_decay: 0.0
+
+datamodule:
+  cfg:
+    image_size: 96
+    slices_per_patient: 50
+
+inference:
+  mode: controlled
+  sampler: ddim
+  t_start: 500
+  nfe: 50
+  ddim_eta: 0.0

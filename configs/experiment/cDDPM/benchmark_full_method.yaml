@@ -1,0 +1,61 @@
+# @package _global_
+
+defaults:
+  - override /trainer: default.yaml
+  - override /model: DDPM_2D.yaml
+  - override /datamodule: benchmark.yaml
+
+name: cDDPM_Spark_benchmark
+seed: 2027
+num_folds: 5
+test_after_training: false
+
+datamodule:
+  cfg:
+    # 已处理 benchmark 输入
+    imageDim: [96, 96]
+    rescaleFactor: 1
+    slices_per_patient: 50
+
+    # DDPM_2D.yaml 的旧变量引用；不改变实际 benchmark 数据
+    lr: 0.0001
+    interRes: [8, 8, 5]
+    cropMode: isotropic
+    resizedEvaluation: true
+    pad: true
+    mode: t2
+
+model:
+  cfg:
+    # 保留论文 cDDPM + Spark 设置
+    unet_dim: 128
+    dim_mults: [1, 2, 2]
+    num_heads: 1
+    backbone: Spark_Encoder_2D
+    version: resnet50
+    cond_dim: 128
+    OpenaiUnet: true
+    spatial_transformer: false
+    condition: true
+    noisetype: simplex
+    test_timesteps: 500
+    noise_ensemble: true
+    save_to_disc: false
+
+    # 加载已完成的 Spark 预训练权重
+    pretrained_encoder: true
+    encoder_path: ${oc.env:SPARK_CHECKPOINT_PATH}
+trainer:
+  max_steps: 100000
+
+callbacks:
+  model_checkpoint:
+    monitor: null
+    save_top_k: -1
+    save_last: true
+    every_n_train_steps: 5000
+    filename: "cddpm-step-{step:06d}"
+
+logger:
+  wandb:
+    project: cDDPM_benchmarks

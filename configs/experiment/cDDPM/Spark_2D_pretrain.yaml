@@ -1,0 +1,53 @@
+# @package _global_
+
+defaults:
+  - override /trainer: default.yaml
+  - override /model: Spark_2D.yaml
+  - override /datamodule: benchmark.yaml
+
+# 已处理的 benchmark 数据：单张二维切片为 [1, 96, 96]
+datamodule:
+  cfg:
+    imageDim: [96, 96]
+    rescaleFactor: 1
+    slices_per_patient: 50
+    lr: 0.0001
+
+    # 仅供 Spark_2D.yaml 的旧变量引用解析；
+    # 当前 Spark 训练代码不会使用它们。
+    interRes: [8, 8, 5]
+    cropMode: isotropic
+    unisotropic_sampling: true
+    resizedEvaluation: true
+    pad: true
+    modelpath: ${data_dir}
+
+model:
+  cfg:
+    # 保留原始 Spark 预训练结构与损失设置
+    backbone: resnet50
+    loss_on_mask: true
+    mask_ratio: 0.65
+
+num_folds: 5
+
+logger:
+  wandb:
+    project: cDDPM_pretrain
+
+ckpt_path: best
+
+trainer:
+  max_steps: 100000
+
+name: MAE_2D_benchmark
+seed: 2027
+test_after_training: false
+
+callbacks:
+  model_checkpoint:
+    monitor: null
+    save_top_k: -1
+    save_last: true
+    every_n_train_steps: 5000
+    filename: "spark-step-{step:06d}"

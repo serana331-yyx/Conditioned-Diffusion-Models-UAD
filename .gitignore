@@ -1,0 +1,19 @@
+# Data, checkpoints, predictions and experiment outputs
+Data/
+data/
+benchmark_data/
+outputs/
+handoff_*/
+web_model_package*/
+*.npz
+*.ckpt
+*.tar
+*.tar.*
+wandb/
+*.out
+
+# Local files
+__pycache__/
+*.py[cod]
+.env
+pc_environment.env

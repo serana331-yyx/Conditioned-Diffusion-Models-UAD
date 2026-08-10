@@ -1,0 +1,16 @@
+_target_: src.datamodules.benchmark_datamodule.BenchmarkDataModule
+
+cfg:
+  name: benchmark
+  data_root: ${oc.env:BENCHMARK_DATA_DIR}
+  train_dir: ${oc.env:BENCHMARK_DATA_DIR}/ixi/train
+  ixi_test_dir: ${oc.env:BENCHMARK_DATA_DIR}/ixi/test
+  brats_test_dir: ${oc.env:BENCHMARK_DATA_DIR}/brats2020/test
+  split_file: ${work_dir}/Data/splits/benchmark_ixi_train420_5fold_seed2026.json
+  batch_size: 16              # effective batch；不足则梯度累积
+  num_workers: 4
+  image_size: 96
+  slices_per_patient: 50
+  input_range: [0.0, 1.0]
+  train_augmentation:
+    horizontal_flip_p: 0.5
