@@ -9,6 +9,7 @@ import torch.optim as optim
 from typing import Any
 import torchio as tio
 from src.utils.generate_noise import gen_noise
+from src.utils.maediff_patching import dilate_mask, random_patch_mask, sliding_patch_masks
 import wandb
 from omegaconf import open_dict
 from collections import OrderedDict
@@ -19,6 +20,10 @@ class DDPM_2D(LightningModule):
         super().__init__()
         
         self.cfg = cfg
+        self.maediff_enabled = cfg.get('maediff_enabled', False)
+        self.maediff_patch_size = cfg.get('maediff_patch_size', 48)
+        self.maediff_patch_stride = cfg.get('maediff_patch_stride', 16)
+        self.maediff_context_margin = cfg.get('maediff_context_margin', 0)
         
         # conditioning net
         if cfg.get('condition',True):
@@ -29,6 +34,11 @@ class DDPM_2D(LightningModule):
         else: 
             out_features = None
 
+
+        context_downsample = cfg.get('maediff_context_downsample', 4)
+        context_grid_size = cfg.get('maediff_grid_size', 16)
+        if self.maediff_enabled and context_grid_size % context_downsample:
+            raise ValueError('maediff_grid_size must be divisible by maediff_context_downsample.')
 
         model = OpenAI_UNet(
                             image_size =  (int(cfg.imageDim[0] / cfg.rescaleFactor),int(cfg.imageDim[1] / cfg.rescaleFactor)),
@@ -52,6 +62,12 @@ class DDPM_2D(LightningModule):
                             use_new_attention_order=True,
                             use_spatial_transformer=cfg.get('spatial_transformer',False),    
                             transformer_depth=1,                            
+                            maediff_context=self.maediff_enabled,
+                            maediff_context_downsample=context_downsample,
+                            maediff_grid_size=context_grid_size // context_downsample,
+                            maediff_embed_dim=cfg.get('maediff_embed_dim',None),
+                            maediff_heads=cfg.get('maediff_heads',4),
+                            maediff_depth=cfg.get('maediff_depth',1),
                             )
         model.convert_to_fp16()
 
@@ -106,6 +122,30 @@ class DDPM_2D(LightningModule):
             x = None
         return x
 
+    def _maediff_masks(self, input):
+        """Create a diffusion target mask and a wider MAE exclusion mask.
+
+        The margin implements the guard band discussed in our design notes: local
+        MAE cross-attention cannot inspect grids immediately adjacent to a target
+        patch, reducing leakage when a lesion crosses a patch boundary.
+        """
+        patch_mask = random_patch_mask(input, self.maediff_patch_size)
+        return patch_mask, dilate_mask(patch_mask, self.maediff_context_margin)
+
+    def _maediff_reconstruct(self, input, features, timestep, noise):
+        """Sequentially reconstruct overlapping patches and average their estimates."""
+        reconstruction = torch.zeros_like(input)
+        contribution_count = torch.zeros_like(input)
+        for patch_mask in sliding_patch_masks(input, self.maediff_patch_size, self.maediff_patch_stride):
+            context_mask = dilate_mask(patch_mask, self.maediff_context_margin)
+            _, patch_reconstruction = self.diffusion(
+                input, cond=features, t=timestep, noise=noise,
+                patch_mask=patch_mask, context_mask=context_mask,
+            )
+            reconstruction += patch_reconstruction * patch_mask
+            contribution_count += patch_mask
+        return reconstruction / contribution_count.clamp_min(1)
+
 
     def training_step(self, batch, batch_idx: int):
         # process batch
@@ -121,7 +161,14 @@ class DDPM_2D(LightningModule):
         else: 
             noise = None
         # reconstruct
-        loss, reco = self.diffusion(input, cond = features, noise = noise)
+        if self.maediff_enabled:
+            patch_mask, context_mask = self._maediff_masks(input)
+            loss, reco = self.diffusion(
+                input, cond=features, noise=noise,
+                patch_mask=patch_mask, context_mask=context_mask,
+            )
+        else:
+            loss, reco = self.diffusion(input, cond = features, noise = noise)
 
         self.log(f'{self.prefix}train/Loss', loss, prog_bar=False, on_step=False, on_epoch=True, batch_size=input.shape[0],sync_dist=True)
         return {"loss": loss}
@@ -138,7 +185,14 @@ class DDPM_2D(LightningModule):
         else: 
             noise = None
         # reconstruct
-        loss, reco = self.diffusion(input,cond=features,noise=noise)
+        if self.maediff_enabled:
+            patch_mask, context_mask = self._maediff_masks(input)
+            loss, reco = self.diffusion(
+                input, cond=features, noise=noise,
+                patch_mask=patch_mask, context_mask=context_mask,
+            )
+        else:
+            loss, reco = self.diffusion(input,cond=features,noise=noise)
 
         self.log(f'{self.prefix}val/Loss_comb', loss, prog_bar=False, on_step=False, on_epoch=True, batch_size=input.shape[0],sync_dist=True)
         return {"loss": loss}
@@ -205,7 +259,11 @@ class DDPM_2D(LightningModule):
                     noise = gen_noise(self.cfg, input.shape).to(self.device)
                 else: 
                     noise = None
-                loss_diff, reco = self.diffusion(input,cond=features,t=t-1,noise=noise)
+                if self.maediff_enabled:
+                    reco = self._maediff_reconstruct(input, features, t - 1, noise)
+                    loss_diff = torch.mean(torch.abs(input - reco))
+                else:
+                    loss_diff, reco = self.diffusion(input,cond=features,t=t-1,noise=noise)
                 reco_ensemble += reco
                 
             reco = reco_ensemble / len(timesteps) # average over timesteps
@@ -214,7 +272,11 @@ class DDPM_2D(LightningModule):
                 noise = gen_noise(self.cfg, input.shape).to(self.device)
             else: 
                 noise = None
-            loss_diff, reco = self.diffusion(input,cond=features,t=self.test_timesteps-1,noise=noise)
+            if self.maediff_enabled:
+                reco = self._maediff_reconstruct(input, features, self.test_timesteps - 1, noise)
+                loss_diff = torch.mean(torch.abs(input - reco))
+            else:
+                loss_diff, reco = self.diffusion(input,cond=features,t=self.test_timesteps-1,noise=noise)
         
         # calculate loss and Anomalyscores
         AnomalyScoreComb.append(loss_diff.cpu())
@@ -260,4 +322,4 @@ class DDPM_2D(LightningModule):
         return optim.Adam(self.parameters(), lr=self.cfg.lr)
     
     def update_prefix(self, prefix):
-        self.prefix = prefix 
+        self.prefix = prefix

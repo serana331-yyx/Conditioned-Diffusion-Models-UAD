@@ -546,11 +546,17 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
 
-    def p_losses(self, x_start, t, cond = None, noise = None, box=None, scale_patch=1, onlybox=False, mask=None):
+    def p_losses(self, x_start, t, cond = None, noise = None, box=None, scale_patch=1,
+                 onlybox=False, mask=None, patch_mask=None, context_mask=None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start)) # some noise with zero mean and unit variance
 
         x = self.q_sample(x_start = x_start, t = t, noise = noise) # generate a noisy image from the start image at timestep t
+
+        if patch_mask is not None:
+            # MAEDiff fusion: corrupt only the target patch; all remaining pixels
+            # stay clean in the U-Net input and provide anatomical context.
+            x = x * patch_mask + x_start * (1 - patch_mask)
         
         if exists(box): # if box is not None, we only want to denoise the box region
             x_patch = []
@@ -561,7 +567,10 @@ class GaussianDiffusion(nn.Module):
                 x[i, :, box[i,1]:box[i,3], box[i,0]:box[i,2]] = x_patch[i]
 
 
-        model_out = self.model(x, t, cond = cond) # predict the noise that has been added to x_start or directly predict x_start from the noisy x, conditioned by the timestep t, cond
+        model_out = self.model(
+            x, t, cond=cond,
+            context_mask=context_mask if patch_mask is not None else None,
+        ) # predict the noise or x_start from the partly-noised image
 
         if self.objective == 'pred_noise': # predict the noise that has been added to x_start
             if exists(box): # if box is not None, we only want to denoise the box region
@@ -588,9 +597,12 @@ class GaussianDiffusion(nn.Module):
             model_out = out
 
         loss = self.loss_fn(model_out, target, reduction = 'none')
-        loss_patch = torch.zeros_like(loss)
-           
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
+        if patch_mask is not None:
+            # Only supervise the target patch.  Outside it, a low loss would merely
+            # reward copying the clean context instead of learning inpainting.
+            loss = (loss * patch_mask).flatten(1).sum(1) / patch_mask.flatten(1).sum(1).clamp_min(1)
+        else:
+            loss = reduce(loss, 'b ... -> b (...)', 'mean')
 
         loss = loss * extract(self.p2_loss_weight, t, loss.shape)
         if self.objective == 'pred_noise':

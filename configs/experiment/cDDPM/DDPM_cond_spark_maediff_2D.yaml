@@ -1,0 +1,49 @@
+# @package _global_
+# cDDPM-SparK enhanced with MAEDiff-style local masked context.
+# This experiment is separate from the original baselines so they remain runnable.
+defaults:
+  - override /trainer: default.yaml
+  - override /model: DDPM_2D.yaml
+  - override /datamodule: IXI.yaml
+
+datamodule:
+  cfg:
+    rescaleFactor: 2
+    imageDim: [192, 192, 100]
+    mode: t2
+    aug_intensity: True
+
+model:
+  cfg:
+    test_timesteps: 500
+    dim_mults: [1, 2, 2]
+    unet_dim: 128
+    backbone: Spark_Encoder_2D
+    cond_dim: 128
+    condition: True
+    noisetype: simplex
+    encoder_path: ${oc.env:SPARK_CHECKPOINT_PATH}
+    pretrained_encoder: True
+    noise_ensemble: True
+    step_ensemble: [250, 500, 750]
+
+    # --- MAEDiff fusion additions ---
+    maediff_enabled: True
+    maediff_patch_size: 48
+    maediff_patch_stride: 16
+    maediff_context_downsample: 4
+    maediff_grid_size: 16
+    maediff_embed_dim: 256
+    maediff_heads: 4
+    maediff_depth: 1
+    # Set to 16 after the no-margin ablation; it hides a one-grid guard band.
+    maediff_context_margin: 0
+
+num_folds: 1
+logger:
+  wandb:
+    project: cDDPM
+trainer:
+  max_epochs: 1200
+name: DDPM_cond_spark_maediff_2D
+seed: 3141

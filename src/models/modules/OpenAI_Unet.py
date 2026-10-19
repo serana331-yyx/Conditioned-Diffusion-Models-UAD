@@ -18,6 +18,7 @@ from src.models.LDM.modules.diffusionmodules.util import (
 )
 
 from src.models.LDM.modules.attention import SpatialTransformer
+from src.models.modules.maediff_context import MaskedGridContext
 
 # dummy replace
 def convert_module_to_f16(l):
@@ -463,7 +464,13 @@ class UNetModel(nn.Module):
         transformer_depth=1,              # custom transformer support
         context_dim=None,                 # custom transformer support
         legacy=True,
-        num_mem_kv=0
+        num_mem_kv=0,
+        maediff_context=False,
+        maediff_context_downsample=4,
+        maediff_grid_size=4,
+        maediff_embed_dim=None,
+        maediff_heads=4,
+        maediff_depth=1,
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -494,6 +501,9 @@ class UNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.num_mem_kv=num_mem_kv
+        self.maediff_context_enabled = maediff_context
+        self.maediff_context_index = None
+        self.maediff_context_downsample = maediff_context_downsample
         if self.num_classes is not None:
             fac = 2
             time_embed_dim = model_channels * 4 * fac
@@ -562,6 +572,11 @@ class UNetModel(nn.Module):
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
                 input_block_chans.append(ch)
+            if maediff_context and ds == maediff_context_downsample:
+                # MAEDiff-style context is injected once, after encoder features at
+                # the requested scale have been assembled and before further pooling.
+                self.maediff_context_index = len(self.input_blocks) - 1
+                self.maediff_context_channels = ch
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
@@ -586,6 +601,21 @@ class UNetModel(nn.Module):
                 input_block_chans.append(ch)
                 ds *= 2
                 self._feature_size += ch
+
+        if maediff_context:
+            if self.maediff_context_index is None:
+                raise ValueError(
+                    f"maediff_context_downsample={maediff_context_downsample} is not an encoder scale."
+                )
+            self.maediff_context = MaskedGridContext(
+                self.maediff_context_channels,
+                grid_size=maediff_grid_size,
+                embed_dim=maediff_embed_dim,
+                heads=maediff_heads,
+                depth=maediff_depth,
+                max_tokens=(image_size[0] // maediff_context_downsample // maediff_grid_size)
+                           * (image_size[1] // maediff_context_downsample // maediff_grid_size),
+            )
 
         if num_head_channels == -1:
             dim_head = ch // num_heads
@@ -710,7 +740,7 @@ class UNetModel(nn.Module):
 
         return self.forward(*args,**kwargs)
 
-    def forward(self, x, timesteps, cond=None, context=None):
+    def forward(self, x, timesteps, cond=None, context=None, context_mask=None):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -728,8 +758,14 @@ class UNetModel(nn.Module):
             emb = th.cat([emb, self.label_emb(cond)], 1)
 
         h = x
-        for module in self.input_blocks:
+        for index, module in enumerate(self.input_blocks):
             h = module(h, emb, context)
+            if self.maediff_context_enabled and index == self.maediff_context_index:
+                if context_mask is None:
+                    raise ValueError("context_mask is required when maediff_context is enabled.")
+                # The mask excludes target/guard-band grids from the MAE encoder;
+                # only visible grids may become keys and values for cross-attention.
+                h = h + self.maediff_context(h, context_mask)
             hs.append(h)
         h = self.middle_block(h, emb, context)
         for module in self.output_blocks:
