@@ -91,6 +91,25 @@ def reconstruct_one_model(model, images):
     """
     features = model(images)
 
+    # MAEDiff requires patch masks; full-image diffusion bypasses its local context.
+    if getattr(model, "maediff_enabled", False):
+        timesteps = (
+            model.cfg.get("step_ensemble", [250, 500, 750])
+            if model.cfg.get("noise_ensemble", False)
+            else [model.test_timesteps]
+        )
+        estimates = []
+        for timestep in timesteps:
+            noise = (
+                gen_noise(model.cfg, images.shape).to(images.device)
+                if model.cfg.get("noisetype") is not None
+                else torch.randn_like(images)
+            )
+            estimates.append(model._maediff_reconstruct(
+                images, features, int(timestep) - 1, noise,
+            ))
+        return torch.stack(estimates).mean(0).clamp(0.0, 1.0)
+
     if model.cfg.get("noise_ensemble", False):
         timesteps = model.cfg.get("step_ensemble", [250, 500, 750])
         reconstruction = torch.zeros_like(images)
